@@ -3814,14 +3814,16 @@ async def _merge_all_chunks(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                        "page_idx": chunk.get("page_idx"),  # Include page_idx
-                    }
-                )
+                chunk_data = {
+                    "content": chunk["content"],
+                    "file_path": chunk.get("file_path", "unknown_source"),
+                    "chunk_id": chunk_id,
+                    "page_idx": chunk.get("page_idx"),  # Include page_idx
+                }
+                # Include img_path if available
+                if "img_path" in chunk and chunk["img_path"]:
+                    chunk_data["img_path"] = chunk["img_path"]
+                merged_chunks.append(chunk_data)
 
         # Add from entity chunks (Local mode)
         if i < len(entity_chunks):
@@ -3829,14 +3831,16 @@ async def _merge_all_chunks(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                        "page_idx": chunk.get("page_idx"),  # Include page_idx
-                    }
-                )
+                chunk_data = {
+                    "content": chunk["content"],
+                    "file_path": chunk.get("file_path", "unknown_source"),
+                    "chunk_id": chunk_id,
+                    "page_idx": chunk.get("page_idx"),  # Include page_idx
+                }
+                # Include img_path if available
+                if "img_path" in chunk and chunk["img_path"]:
+                    chunk_data["img_path"] = chunk["img_path"]
+                merged_chunks.append(chunk_data)
 
         # Add from relation chunks (Global mode)
         if i < len(relation_chunks):
@@ -3844,14 +3848,16 @@ async def _merge_all_chunks(
             chunk_id = chunk.get("chunk_id") or chunk.get("id")
             if chunk_id and chunk_id not in seen_chunk_ids:
                 seen_chunk_ids.add(chunk_id)
-                merged_chunks.append(
-                    {
-                        "content": chunk["content"],
-                        "file_path": chunk.get("file_path", "unknown_source"),
-                        "chunk_id": chunk_id,
-                        "page_idx": chunk.get("page_idx"),  # Include page_idx
-                    }
-                )
+                chunk_data = {
+                    "content": chunk["content"],
+                    "file_path": chunk.get("file_path", "unknown_source"),
+                    "chunk_id": chunk_id,
+                    "page_idx": chunk.get("page_idx"),  # Include page_idx
+                }
+                # Include img_path if available
+                if "img_path" in chunk and chunk["img_path"]:
+                    chunk_data["img_path"] = chunk["img_path"]
+                merged_chunks.append(chunk_data)
 
     logger.info(
         f"Round-robin merged chunks: {origin_len} -> {len(merged_chunks)} (deduplicated {origin_len - len(merged_chunks)})"
@@ -3971,6 +3977,9 @@ async def _build_llm_context(
         # Include page_idx if available so LLM can cite page numbers
         if "page_idx" in chunk and chunk["page_idx"] is not None:
             chunk_dict["page_idx"] = chunk["page_idx"]
+        # Include img_path if available so LLM can reference images
+        if "img_path" in chunk and chunk["img_path"]:
+            chunk_dict["img_path"] = chunk["img_path"]
         text_units_context.append(chunk_dict)
 
     logger.info(

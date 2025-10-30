@@ -240,22 +240,21 @@ Consider the conversation history if provided to maintain conversational flow an
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
-4. References Section Format:
-  - The References section should be under heading: `### References`
-  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
-  - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+4. In-Line Citations:
+  - Use in-line citations in the format: [Document_Name, p.X] where X is the page number from page_idx field.
+  - Place citations immediately after the sentence or claim they support.
+  - Example: "The Sprint Quattro leads are MR-conditional [test_doc.pdf, p.1]."
+  - Do NOT generate a References section at the end of the response.
 
-5. Reference Section Example:
-```
-### References
-
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
-```
+5. Image Handling:
+  - ONLY mention images if they are directly relevant to answering the user's query.
+  - If retrieved chunks contain img_path fields but the images are not relevant to the question, do NOT mention them.
+  - When an image IS relevant and helps answer the query, provide its path as an in-line citation.
+  - CRITICAL: Do NOT use markdown image syntax ![alt](path) or any variation of it.
+  - CRITICAL: Do NOT display the image path more than once.
+  - Provide the image path ONLY ONCE as plain text using in-line citation format: "Image path: [path] [Document_Name, p.X]"
+  - Example: "Image path: C:\path\to\image.png [test_doc.pdf, p.1]"
+  - Never duplicate the image path in any form.
 
 6. Additional Instructions: {user_prompt}
 
@@ -281,10 +280,9 @@ Consider the conversation history if provided to maintain conversational flow an
   - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
   - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
-  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
-  - When document chunks include a page_idx field, incorporate the page number in your citations (e.g., "page 5") to help users locate the information.
-  - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
-  - Do not generate anything after the reference section.
+  - Use in-line citations immediately after claims, in the format [Document_Name, p.X] where X is from the page_idx field.
+  - When chunks include img_path field, mention the image and provide its path as plain text (not markdown image syntax).
+  - Do NOT generate a References section at the end of the response.
 
 2. Content & Grounding:
   - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer any information not explicitly stated.
@@ -295,22 +293,21 @@ Consider the conversation history if provided to maintain conversational flow an
   - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
   - The response should be presented in {response_type}.
 
-4. References Section Format:
-  - The References section should be under heading: `### References`
-  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
-  - The Document Title in the citation must retain its original language.
-  - Output each citation on an individual line
-  - Provide maximum of 5 most relevant citations.
-  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+4. In-Line Citations:
+  - Use in-line citations in the format: [Document_Name, p.X] where X is the page number from page_idx field.
+  - Place citations immediately after the sentence or claim they support.
+  - Example: "The Sprint Quattro leads are MR-conditional [test_doc.pdf, p.1]."
+  - Do NOT generate a References section at the end of the response.
 
-5. Reference Section Example:
-```
-### References
-
-- [1] Document Title One
-- [2] Document Title Two
-- [3] Document Title Three
-```
+5. Image Handling:
+  - ONLY mention images if they are directly relevant to answering the user's query.
+  - If retrieved chunks contain img_path fields but the images are not relevant to the question, do NOT mention them.
+  - When an image IS relevant and helps answer the query, provide its path as an in-line citation.
+  - CRITICAL: Do NOT use markdown image syntax ![alt](path) or any variation of it.
+  - CRITICAL: Do NOT display the image path more than once.
+  - Provide the image path ONLY ONCE as plain text using in-line citation format: "Image path: [path] [Document_Name, p.X]"
+  - Example: "Image path: C:\path\to\image.png [test_doc.pdf, p.1]"
+  - Never duplicate the image path in any form.
 
 6. Additional Instructions: {user_prompt}
 
