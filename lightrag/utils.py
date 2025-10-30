@@ -1612,6 +1612,8 @@ async def use_llm_func_with_cache(
     cache_type: str = "extract",
     chunk_id: str | None = None,
     cache_keys_collector: list = None,
+    token_tracker: "TokenTracker | None" = None,
+    operation: str = None,
 ) -> tuple[str, int]:
     """Call LLM function with cache support and text sanitization
 
@@ -1694,6 +1696,10 @@ async def use_llm_func_with_cache(
             kwargs["history_messages"] = safe_history_messages
         if max_tokens is not None:
             kwargs["max_tokens"] = max_tokens
+        if token_tracker is not None:
+            kwargs["token_tracker"] = token_tracker
+        if operation is not None:
+            kwargs["operation"] = operation
 
         res: str = await use_llm_func(
             safe_user_prompt, system_prompt=safe_system_prompt, **kwargs
@@ -1728,6 +1734,10 @@ async def use_llm_func_with_cache(
         kwargs["history_messages"] = safe_history_messages
     if max_tokens is not None:
         kwargs["max_tokens"] = max_tokens
+    if token_tracker is not None:
+        kwargs["token_tracker"] = token_tracker
+    if operation is not None:
+        kwargs["operation"] = operation
 
     try:
         res = await use_llm_func(
@@ -2228,9 +2238,31 @@ async def pick_by_vector_similarity(
 
 
 class TokenTracker:
-    """Track token usage for LLM calls."""
+    """Track token usage for LLM and embedding calls with cost calculation.
+    
+    This class tracks token usage across all operations including:
+    - LLM calls (parsing, entity extraction, queries)
+    - Embedding calls (document indexing, query embedding)
+    
+    It can calculate costs based on user-provided pricing per million tokens.
+    """
 
-    def __init__(self):
+    def __init__(
+        self,
+        llm_prompt_cost_per_million: float = 0.0,
+        llm_completion_cost_per_million: float = 0.0,
+        embedding_cost_per_million: float = 0.0,
+    ):
+        """Initialize TokenTracker with optional cost configuration.
+        
+        Args:
+            llm_prompt_cost_per_million: Cost per million prompt tokens (default: 0.0)
+            llm_completion_cost_per_million: Cost per million completion tokens (default: 0.0)
+            embedding_cost_per_million: Cost per million embedding tokens (default: 0.0)
+        """
+        self.llm_prompt_cost_per_million = llm_prompt_cost_per_million
+        self.llm_completion_cost_per_million = llm_completion_cost_per_million
+        self.embedding_cost_per_million = embedding_cost_per_million
         self.reset()
 
     def __enter__(self):
@@ -2241,47 +2273,260 @@ class TokenTracker:
         print(self)
 
     def reset(self):
+        """Reset all counters to zero."""
+        # LLM token counts (text-only LLM)
         self.prompt_tokens = 0
         self.completion_tokens = 0
         self.total_tokens = 0
         self.call_count = 0
+        
+        # Vision LLM token counts
+        self.vision_prompt_tokens = 0
+        self.vision_completion_tokens = 0
+        self.vision_total_tokens = 0
+        self.vision_call_count = 0
+        
+        # Embedding token counts
+        self.embedding_tokens = 0
+        self.embedding_call_count = 0
+        
+        # Operation-specific tracking
+        self.operations = {
+            "parsing": {"prompt": 0, "completion": 0, "total": 0, "calls": 0},
+            "indexing": {"prompt": 0, "completion": 0, "total": 0, "calls": 0},
+            "query": {"prompt": 0, "completion": 0, "total": 0, "calls": 0},
+            "vision": {"prompt": 0, "completion": 0, "total": 0, "calls": 0},
+            "embedding": {"tokens": 0, "calls": 0},
+        }
 
-    def add_usage(self, token_counts):
+    def set_costs(
+        self,
+        llm_prompt_cost_per_million: float = None,
+        llm_completion_cost_per_million: float = None,
+        vision_prompt_cost_per_million: float = None,
+        vision_completion_cost_per_million: float = None,
+        embedding_cost_per_million: float = None,
+    ):
+        """Update cost configuration.
+        
+        Args:
+            llm_prompt_cost_per_million: Cost per million prompt tokens for text LLM
+            llm_completion_cost_per_million: Cost per million completion tokens for text LLM
+            vision_prompt_cost_per_million: Cost per million prompt tokens for vision LLM
+            vision_completion_cost_per_million: Cost per million completion tokens for vision LLM
+            embedding_cost_per_million: Cost per million embedding tokens
+        """
+        if llm_prompt_cost_per_million is not None:
+            self.llm_prompt_cost_per_million = llm_prompt_cost_per_million
+        if llm_completion_cost_per_million is not None:
+            self.llm_completion_cost_per_million = llm_completion_cost_per_million
+        if vision_prompt_cost_per_million is not None:
+            self.vision_prompt_cost_per_million = vision_prompt_cost_per_million
+        if vision_completion_cost_per_million is not None:
+            self.vision_completion_cost_per_million = vision_completion_cost_per_million
+        if embedding_cost_per_million is not None:
+            self.embedding_cost_per_million = embedding_cost_per_million
+
+    def add_usage(self, token_counts, operation: str = None, model_type: str = "llm"):
         """Add token usage from one LLM call.
 
         Args:
             token_counts: A dictionary containing prompt_tokens, completion_tokens, total_tokens
+            operation: Optional operation name ("parsing", "indexing", "query", "vision") for detailed tracking
+            model_type: Type of model ("llm" for text LLM, "vision" for vision LLM) - default: "llm"
         """
-        self.prompt_tokens += token_counts.get("prompt_tokens", 0)
-        self.completion_tokens += token_counts.get("completion_tokens", 0)
-
+        prompt = token_counts.get("prompt_tokens", 0)
+        completion = token_counts.get("completion_tokens", 0)
+        
         # If total_tokens is provided, use it directly; otherwise calculate the sum
         if "total_tokens" in token_counts:
-            self.total_tokens += token_counts["total_tokens"]
+            total = token_counts["total_tokens"]
         else:
-            self.total_tokens += token_counts.get(
-                "prompt_tokens", 0
-            ) + token_counts.get("completion_tokens", 0)
+            total = prompt + completion
+        
+        # Add to appropriate counter based on model type
+        if model_type == "vision":
+            self.vision_prompt_tokens += prompt
+            self.vision_completion_tokens += completion
+            self.vision_total_tokens += total
+            self.vision_call_count += 1
+        else:
+            self.prompt_tokens += prompt
+            self.completion_tokens += completion
+            self.total_tokens += total
+            self.call_count += 1
+        
+        # Track by operation if specified
+        if operation and operation in self.operations:
+            self.operations[operation]["prompt"] += prompt
+            self.operations[operation]["completion"] += completion
+            self.operations[operation]["total"] += total
+            self.operations[operation]["calls"] += 1
 
-        self.call_count += 1
+    def add_embedding_usage(self, token_count: int, operation: str = "embedding"):
+        """Add token usage from embedding calls.
+        
+        Args:
+            token_count: Number of tokens used in embedding operation
+            operation: Operation name (default: "embedding")
+        """
+        self.embedding_tokens += token_count
+        self.embedding_call_count += 1
+        
+        if operation in self.operations:
+            self.operations[operation]["tokens"] += token_count
+            self.operations[operation]["calls"] += 1
 
     def get_usage(self):
         """Get current usage statistics."""
         return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-            "call_count": self.call_count,
+            "llm": {
+                "prompt_tokens": self.prompt_tokens,
+                "completion_tokens": self.completion_tokens,
+                "total_tokens": self.total_tokens,
+                "call_count": self.call_count,
+            },
+            "vision": {
+                "prompt_tokens": self.vision_prompt_tokens,
+                "completion_tokens": self.vision_completion_tokens,
+                "total_tokens": self.vision_total_tokens,
+                "call_count": self.vision_call_count,
+            },
+            "embedding": {
+                "tokens": self.embedding_tokens,
+                "call_count": self.embedding_call_count,
+            },
+            "operations": self.operations.copy(),
+        }
+
+    def get_costs(self):
+        """Calculate and return costs based on token usage.
+        
+        Returns:
+            Dictionary with cost breakdown by model type, operation, and totals
+        """
+        llm_prompt_cost = (self.prompt_tokens / 1_000_000) * self.llm_prompt_cost_per_million
+        llm_completion_cost = (self.completion_tokens / 1_000_000) * self.llm_completion_cost_per_million
+        vision_prompt_cost = (self.vision_prompt_tokens / 1_000_000) * self.vision_prompt_cost_per_million
+        vision_completion_cost = (self.vision_completion_tokens / 1_000_000) * self.vision_completion_cost_per_million
+        embedding_cost = (self.embedding_tokens / 1_000_000) * self.embedding_cost_per_million
+        
+        total_cost = llm_prompt_cost + llm_completion_cost + vision_prompt_cost + vision_completion_cost + embedding_cost
+        
+        # Calculate operation-specific costs
+        operation_costs = {}
+        for op_name, op_data in self.operations.items():
+            if op_name == "embedding":
+                operation_costs[op_name] = (op_data["tokens"] / 1_000_000) * self.embedding_cost_per_million
+            elif op_name == "vision":
+                prompt_cost = (op_data["prompt"] / 1_000_000) * self.vision_prompt_cost_per_million
+                completion_cost = (op_data["completion"] / 1_000_000) * self.vision_completion_cost_per_million
+                operation_costs[op_name] = prompt_cost + completion_cost
+            else:
+                prompt_cost = (op_data["prompt"] / 1_000_000) * self.llm_prompt_cost_per_million
+                completion_cost = (op_data["completion"] / 1_000_000) * self.llm_completion_cost_per_million
+                operation_costs[op_name] = prompt_cost + completion_cost
+        
+        return {
+            "llm_prompt_cost": llm_prompt_cost,
+            "llm_completion_cost": llm_completion_cost,
+            "vision_prompt_cost": vision_prompt_cost,
+            "vision_completion_cost": vision_completion_cost,
+            "embedding_cost": embedding_cost,
+            "total_cost": total_cost,
+            "operation_costs": operation_costs,
         }
 
     def __str__(self):
         usage = self.get_usage()
-        return (
-            f"LLM call count: {usage['call_count']}, "
-            f"Prompt tokens: {usage['prompt_tokens']}, "
-            f"Completion tokens: {usage['completion_tokens']}, "
-            f"Total tokens: {usage['total_tokens']}"
+        costs = self.get_costs()
+        
+        result = [
+            "=" * 70,
+            "Token Usage Summary",
+            "=" * 70,
+            f"Text LLM Calls: {usage['llm']['call_count']}",
+            f"  Prompt tokens:     {usage['llm']['prompt_tokens']:,}",
+            f"  Completion tokens: {usage['llm']['completion_tokens']:,}",
+            f"  Total tokens:      {usage['llm']['total_tokens']:,}",
+            "",
+        ]
+        
+        if usage['vision']['call_count'] > 0:
+            result.extend([
+                f"Vision LLM Calls: {usage['vision']['call_count']}",
+                f"  Prompt tokens:     {usage['vision']['prompt_tokens']:,}",
+                f"  Completion tokens: {usage['vision']['completion_tokens']:,}",
+                f"  Total tokens:      {usage['vision']['total_tokens']:,}",
+                "",
+            ])
+        
+        result.extend([
+            f"Embedding Calls: {usage['embedding']['call_count']}",
+            f"  Tokens: {usage['embedding']['tokens']:,}",
+            "",
+        ])
+        
+        # Add operation breakdown if any operations were tracked
+        has_operations = any(
+            op_data["calls"] > 0 or op_data.get("tokens", 0) > 0
+            for op_data in usage["operations"].values()
         )
+        
+        if has_operations:
+            result.extend([
+                "Operation Breakdown:",
+                "-" * 70,
+            ])
+            
+            for op_name, op_data in usage["operations"].items():
+                if op_name == "embedding":
+                    if op_data["calls"] > 0:
+                        result.append(f"  {op_name.capitalize()}: {op_data['calls']} calls, {op_data['tokens']:,} tokens")
+                else:
+                    if op_data["calls"] > 0:
+                        result.append(
+                            f"  {op_name.capitalize()}: {op_data['calls']} calls, "
+                            f"{op_data['total']:,} tokens "
+                            f"(prompt: {op_data['prompt']:,}, completion: {op_data['completion']:,})"
+                        )
+            result.append("")
+        
+        # Add cost information if pricing is configured
+        if costs["total_cost"] > 0:
+            result.extend([
+                "Cost Breakdown:",
+                "-" * 70,
+                f"  Text LLM Prompt cost:     ${costs['llm_prompt_cost']:.6f}",
+                f"  Text LLM Completion cost: ${costs['llm_completion_cost']:.6f}",
+            ])
+            
+            if costs['vision_prompt_cost'] > 0 or costs['vision_completion_cost'] > 0:
+                result.extend([
+                    f"  Vision LLM Prompt cost:     ${costs['vision_prompt_cost']:.6f}",
+                    f"  Vision LLM Completion cost: ${costs['vision_completion_cost']:.6f}",
+                ])
+            
+            result.extend([
+                f"  Embedding cost:      ${costs['embedding_cost']:.6f}",
+                "-" * 70,
+                f"  TOTAL COST:          ${costs['total_cost']:.6f}",
+                "",
+            ])
+            
+            # Add operation costs if tracked
+            if has_operations:
+                result.extend([
+                    "Cost by Operation:",
+                    "-" * 70,
+                ])
+                for op_name, op_cost in costs["operation_costs"].items():
+                    if op_cost > 0:
+                        result.append(f"  {op_name.capitalize()}: ${op_cost:.6f}")
+                result.append("")
+        
+        result.append("=" * 70)
+        return "\n".join(result)
 
 
 async def apply_rerank_if_enabled(
@@ -2926,6 +3171,7 @@ def convert_to_user_format(
             "content": chunk.get("content", ""),
             "file_path": chunk.get("file_path", "unknown_source"),
             "chunk_id": chunk.get("chunk_id", ""),
+            "page_idx": chunk.get("page_idx"),  # Include page_idx
         }
         formatted_chunks.append(chunk_data)
 

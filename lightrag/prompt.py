@@ -282,6 +282,7 @@ Consider the conversation history if provided to maintain conversational flow an
   - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
   - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
   - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
+  - When document chunks include a page_idx field, incorporate the page number in your citations (e.g., "page 5") to help users locate the information.
   - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
   - Do not generate anything after the reference section.
 
@@ -332,7 +333,7 @@ Knowledge Graph Data (Relationship):
 {relations_str}
 ```
 
-Document Chunks (Each entry has a reference_id refer to the `Reference Document List`):
+Document Chunks (Each entry has a reference_id refer to the `Reference Document List`, and may include page_idx indicating the page number):
 
 ```json
 {text_chunks_str}
@@ -347,7 +348,7 @@ Reference Document List (Each entry starts with a [reference_id] that correspond
 """
 
 PROMPTS["naive_query_context"] = """
-Document Chunks (Each entry has a reference_id refer to the `Reference Document List`):
+Document Chunks (Each entry has a reference_id refer to the `Reference Document List`, and may include page_idx indicating the page number):
 
 ```json
 {text_chunks_str}

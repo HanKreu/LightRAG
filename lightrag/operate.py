@@ -100,7 +100,32 @@ def chunking_by_token_size(
     split_by_character_only: bool = False,
     overlap_token_size: int = 128,
     max_token_size: int = 1024,
+    page_idx_map: dict[int, int] | None = None,
 ) -> list[dict[str, Any]]:
+    """
+    Chunk content by token size, optionally respecting page boundaries.
+    
+    Args:
+        tokenizer: Tokenizer to use for encoding/decoding
+        content: Text content to chunk
+        split_by_character: Optional character to split on first
+        split_by_character_only: If True, only split on character without further token-based splitting
+        overlap_token_size: Number of tokens to overlap between chunks
+        max_token_size: Maximum tokens per chunk
+        page_idx_map: Optional mapping from character position to page index. If provided,
+                     chunks will not span across page boundaries.
+    
+    Returns:
+        List of chunk dictionaries with tokens, content, chunk_order_index, and optionally page_idx
+    """
+    # If page_idx_map is provided, use page-aware chunking
+    if page_idx_map:
+        return chunking_by_token_size_page_aware(
+            tokenizer, content, split_by_character, split_by_character_only,
+            overlap_token_size, max_token_size, page_idx_map
+        )
+    
+    # Original implementation for non-page-aware chunking
     tokens = tokenizer.encode(content)
     results: list[dict[str, Any]] = []
     if split_by_character:
@@ -145,6 +170,95 @@ def chunking_by_token_size(
                     "chunk_order_index": index,
                 }
             )
+    return results
+
+
+def chunking_by_token_size_page_aware(
+    tokenizer: Tokenizer,
+    content: str,
+    split_by_character: str | None = None,
+    split_by_character_only: bool = False,
+    overlap_token_size: int = 128,
+    max_token_size: int = 1024,
+    page_idx_map: dict[int, int] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Chunk content by token size while respecting page boundaries.
+    Ensures that no chunk spans across multiple pages.
+    
+    Args:
+        tokenizer: Tokenizer to use for encoding/decoding
+        content: Text content to chunk
+        split_by_character: Optional character to split on first (not used in page-aware mode)
+        split_by_character_only: Not used in page-aware mode
+        overlap_token_size: Number of tokens to overlap between chunks (within same page)
+        max_token_size: Maximum tokens per chunk
+        page_idx_map: Mapping from character position to page index
+    
+    Returns:
+        List of chunk dictionaries with tokens, content, chunk_order_index, and page_idx
+    """
+    if not page_idx_map:
+        # Fallback to regular chunking if no page map provided
+        return chunking_by_token_size(
+            tokenizer, content, split_by_character, split_by_character_only,
+            overlap_token_size, max_token_size, None
+        )
+    
+    # Convert string keys to int if necessary
+    int_page_idx_map = {int(k) if isinstance(k, str) else k: v for k, v in page_idx_map.items()}
+    
+    # First, split content into page segments
+    page_segments = []  # List of (page_idx, start_pos, end_pos, text)
+    
+    if not int_page_idx_map:
+        # No page mapping, treat entire content as single page (page 1)
+        page_segments.append((1, 0, len(content), content))
+    else:
+        # Group content by page
+        current_page = None
+        page_start = 0
+        
+        for pos in range(len(content)):
+            page_idx = int_page_idx_map.get(pos, current_page if current_page is not None else 1)
+            
+            if current_page is None:
+                current_page = page_idx
+                page_start = pos
+            elif page_idx != current_page:
+                # Page boundary detected - save previous page segment
+                page_segments.append((current_page, page_start, pos, content[page_start:pos]))
+                current_page = page_idx
+                page_start = pos
+        
+        # Add the last segment
+        if page_start < len(content):
+            page_segments.append((current_page, page_start, len(content), content[page_start:]))
+    
+    # Now chunk each page segment independently
+    results: list[dict[str, Any]] = []
+    chunk_order_index = 0
+    
+    for page_idx, start_pos, end_pos, page_text in page_segments:
+        if not page_text.strip():
+            continue
+        
+        # Encode the page text
+        page_tokens = tokenizer.encode(page_text)
+        
+        # Chunk this page's content
+        for start in range(0, len(page_tokens), max_token_size - overlap_token_size):
+            chunk_tokens = page_tokens[start : start + max_token_size]
+            chunk_content = tokenizer.decode(chunk_tokens)
+            
+            results.append({
+                "tokens": len(chunk_tokens),
+                "content": chunk_content.strip(),
+                "chunk_order_index": chunk_order_index,
+                "page_idx": page_idx,
+            })
+            chunk_order_index += 1
+    
     return results
 
 
@@ -344,6 +458,8 @@ async def _summarize_descriptions(
         use_llm_func,
         llm_response_cache=llm_response_cache,
         cache_type="summary",
+        token_tracker=global_config.get("token_tracker"),
+        operation="summary",
     )
     return summary
 
@@ -2724,6 +2840,8 @@ async def extract_entities(
             cache_type="extract",
             chunk_id=chunk_key,
             cache_keys_collector=cache_keys_collector,
+            token_tracker=global_config.get("token_tracker"),
+            operation="extract",
         )
 
         history = pack_user_ass_to_openai_messages(
@@ -2751,6 +2869,8 @@ async def extract_entities(
                 cache_type="extract",
                 chunk_id=chunk_key,
                 cache_keys_collector=cache_keys_collector,
+                token_tracker=global_config.get("token_tracker"),
+                operation="extract",
             )
 
             # Process gleaning result separately with file path
@@ -3042,6 +3162,8 @@ async def kg_query(
             history_messages=query_param.conversation_history,
             enable_cot=True,
             stream=query_param.stream,
+            token_tracker=global_config.get("token_tracker"),
+            operation="query",
         )
 
         if hashing_kv and hashing_kv.global_config.get("enable_llm_cache"):
@@ -3279,6 +3401,7 @@ async def _get_vector_context(
                     "file_path": result.get("file_path", "unknown_source"),
                     "source_type": "vector",  # Mark the source type
                     "chunk_id": result.get("id"),  # Add chunk_id for deduplication
+                    "page_idx": result.get("page_idx"),  # Include page_idx
                 }
                 valid_chunks.append(chunk_with_metadata)
 
@@ -3696,6 +3819,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "page_idx": chunk.get("page_idx"),  # Include page_idx
                     }
                 )
 
@@ -3710,6 +3834,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "page_idx": chunk.get("page_idx"),  # Include page_idx
                     }
                 )
 
@@ -3724,6 +3849,7 @@ async def _merge_all_chunks(
                         "content": chunk["content"],
                         "file_path": chunk.get("file_path", "unknown_source"),
                         "chunk_id": chunk_id,
+                        "page_idx": chunk.get("page_idx"),  # Include page_idx
                     }
                 )
 
@@ -3838,12 +3964,14 @@ async def _build_llm_context(
     # The actual tokens may be slightly less than available_chunk_tokens due to deduplication logic
     text_units_context = []
     for i, chunk in enumerate(truncated_chunks):
-        text_units_context.append(
-            {
-                "reference_id": chunk["reference_id"],
-                "content": chunk["content"],
-            }
-        )
+        chunk_dict = {
+            "reference_id": chunk["reference_id"],
+            "content": chunk["content"],
+        }
+        # Include page_idx if available so LLM can cite page numbers
+        if "page_idx" in chunk and chunk["page_idx"] is not None:
+            chunk_dict["page_idx"] = chunk["page_idx"]
+        text_units_context.append(chunk_dict)
 
     logger.info(
         f"Final context: {len(entities_context)} entities, {len(relations_context)} relations, {len(text_units_context)} chunks"
@@ -4765,12 +4893,14 @@ async def naive_query(
     # Build text_units_context from processed chunks with reference IDs
     text_units_context = []
     for i, chunk in enumerate(processed_chunks_with_ref_ids):
-        text_units_context.append(
-            {
-                "reference_id": chunk["reference_id"],
-                "content": chunk["content"],
-            }
-        )
+        chunk_dict = {
+            "reference_id": chunk["reference_id"],
+            "content": chunk["content"],
+        }
+        # Include page_idx if available so LLM can cite page numbers
+        if "page_idx" in chunk and chunk["page_idx"] is not None:
+            chunk_dict["page_idx"] = chunk["page_idx"]
+        text_units_context.append(chunk_dict)
 
     text_units_str = "\n".join(
         json.dumps(text_unit, ensure_ascii=False) for text_unit in text_units_context

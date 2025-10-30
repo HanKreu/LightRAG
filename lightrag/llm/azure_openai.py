@@ -26,6 +26,7 @@ from lightrag.utils import (
     safe_unicode_decode,
     logger,
 )
+from typing import Any
 
 import numpy as np
 
@@ -46,6 +47,8 @@ async def azure_openai_complete_if_cache(
     base_url: str | None = None,
     api_key: str | None = None,
     api_version: str | None = None,
+    token_tracker: Any | None = None,
+    operation: str | None = None,
     **kwargs,
 ):
     if enable_cot:
@@ -68,6 +71,7 @@ async def azure_openai_complete_if_cache(
     kwargs.pop("hashing_kv", None)
     kwargs.pop("keyword_extraction", None)
     timeout = kwargs.pop("timeout", None)
+    # Note: token_tracker and operation are now explicit parameters, not in kwargs
 
     openai_async_client = AsyncAzureOpenAI(
         azure_endpoint=base_url,
@@ -111,6 +115,16 @@ async def azure_openai_complete_if_cache(
         content = response.choices[0].message.content
         if r"\u" in content:
             content = safe_unicode_decode(content.encode("utf-8"))
+        
+        # Track token usage for non-streaming responses
+        if token_tracker and hasattr(response, "usage"):
+            token_counts = {
+                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(response.usage, "completion_tokens", 0),
+                "total_tokens": getattr(response.usage, "total_tokens", 0),
+            }
+            token_tracker.add_usage(token_counts, operation=operation)
+        
         return content
 
 
@@ -142,6 +156,7 @@ async def azure_openai_embed(
     base_url: str | None = None,
     api_key: str | None = None,
     api_version: str | None = None,
+    token_tracker: Any | None = None,
 ) -> np.ndarray:
     deployment = (
         os.getenv("AZURE_EMBEDDING_DEPLOYMENT")
@@ -174,4 +189,10 @@ async def azure_openai_embed(
     response = await openai_async_client.embeddings.create(
         model=model, input=texts, encoding_format="float"
     )
+    
+    # Track token usage for embedding calls
+    if token_tracker and hasattr(response, "usage"):
+        total_tokens = getattr(response.usage, "total_tokens", 0)
+        token_tracker.add_embedding_usage(total_tokens)
+    
     return np.array([dp.embedding for dp in response.data])

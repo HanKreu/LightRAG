@@ -169,6 +169,10 @@ async def openai_complete_if_cache(
     # Remove special kwargs that shouldn't be passed to OpenAI
     kwargs.pop("hashing_kv", None)
     kwargs.pop("keyword_extraction", None)
+    
+    # Extract token tracking parameters before passing kwargs to OpenAI
+    token_tracker = kwargs.pop("token_tracker", None)
+    operation = kwargs.pop("operation", None)
 
     # Extract client configuration options
     client_configs = kwargs.pop("openai_client_configs", {})
@@ -326,7 +330,7 @@ async def openai_complete_if_cache(
                         ),
                         "total_tokens": getattr(final_chunk_usage, "total_tokens", 0),
                     }
-                    token_tracker.add_usage(token_counts)
+                    token_tracker.add_usage(token_counts, operation=operation)
                     logger.debug(f"Streaming token usage (from API): {token_counts}")
                 elif token_tracker:
                     logger.debug("No usage information available in streaming response")
@@ -461,7 +465,7 @@ async def openai_complete_if_cache(
                     ),
                     "total_tokens": getattr(response.usage, "total_tokens", 0),
                 }
-                token_tracker.add_usage(token_counts)
+                token_tracker.add_usage(token_counts, operation=operation)
 
             logger.debug(f"Response content len: {len(final_content)}")
             verbose_debug(f"Response: {response}")
@@ -612,11 +616,9 @@ async def openai_embed(
         )
 
         if token_tracker and hasattr(response, "usage"):
-            token_counts = {
-                "prompt_tokens": getattr(response.usage, "prompt_tokens", 0),
-                "total_tokens": getattr(response.usage, "total_tokens", 0),
-            }
-            token_tracker.add_usage(token_counts)
+            # Use add_embedding_usage for embedding calls
+            total_tokens = getattr(response.usage, "total_tokens", 0)
+            token_tracker.add_embedding_usage(total_tokens)
 
         return np.array(
             [

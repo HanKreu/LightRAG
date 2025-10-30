@@ -242,6 +242,7 @@ class LightRAG:
             bool,
             int,
             int,
+            Optional[Dict[int, int]],
         ],
         List[Dict[str, Any]],
     ] = field(default_factory=lambda: chunking_by_token_size)
@@ -256,10 +257,13 @@ class LightRAG:
         - `split_by_character_only`: If True, the text is split only on the specified character.
         - `chunk_token_size`: The maximum number of tokens per chunk.
         - `chunk_overlap_token_size`: The number of overlapping tokens between consecutive chunks.
+        - `page_idx_map`: Optional mapping from character position to page index. If provided,
+                         chunks will not span across page boundaries (supported by default chunking_by_token_size).
 
     The function should return a list of dictionaries, where each dictionary contains the following keys:
         - `tokens`: The number of tokens in the chunk.
         - `content`: The text content of the chunk.
+        - `page_idx`: (Optional) The page index for the chunk, if page_idx_map was provided.
 
     Defaults to `chunking_by_token_size` if not specified.
     """
@@ -300,6 +304,9 @@ class LightRAG:
 
     llm_model_func: Callable[..., object] | None = field(default=None)
     """Function for interacting with the large language model (LLM). Must be set before use."""
+    
+    token_tracker: Any = field(default=None)
+    """Optional TokenTracker instance for monitoring token usage and costs across all LLM and embedding operations."""
 
     llm_model_name: str = field(default="gpt-4o-mini")
     """Name of the LLM model used for generating responses."""
@@ -518,6 +525,24 @@ class LightRAG:
             llm_timeout=self.default_embedding_timeout,
             queue_name="Embedding func",
         )(self.embedding_func)
+        
+        # Wrap LLM function to automatically inject token_tracker
+        if self.llm_model_func is not None and self.token_tracker is not None:
+            original_llm_func = self.llm_model_func
+            token_tracker_ref = self.token_tracker  # Capture in closure
+            
+            async def llm_func_with_token_tracker(*args, **kwargs):
+                # Inject token_tracker if not already present
+                if "token_tracker" not in kwargs:
+                    kwargs["token_tracker"] = token_tracker_ref
+                result = original_llm_func(*args, **kwargs)
+                # Handle both async and sync functions
+                if asyncio.iscoroutine(result):
+                    return await result
+                return result
+            
+            self.llm_model_func = llm_func_with_token_tracker
+            logger.info("LLM function wrapped with token_tracker injection")
 
         # Initialize all storages
         self.key_string_value_json_storage_cls: type[BaseKVStorage] = (
@@ -607,7 +632,7 @@ class LightRAG:
             namespace=NameSpace.VECTOR_STORE_CHUNKS,
             workspace=self.workspace,
             embedding_func=self.embedding_func,
-            meta_fields={"full_doc_id", "content", "file_path"},
+            meta_fields={"full_doc_id", "content", "file_path", "page_idx"},
         )
 
         # Initialize document status storage
@@ -1108,6 +1133,7 @@ class LightRAG:
         ids: str | list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        page_idx_map: dict[int, int] | None = None,
     ) -> str:
         """Async Insert documents with checkpoint support
 
@@ -1120,6 +1146,7 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated
+            page_idx_map: Optional mapping from character position to page_idx for chunks
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1128,7 +1155,7 @@ class LightRAG:
         if track_id is None:
             track_id = generate_track_id("insert")
 
-        await self.apipeline_enqueue_documents(input, ids, file_paths, track_id)
+        await self.apipeline_enqueue_documents(input, ids, file_paths, track_id, page_idx_map)
         await self.apipeline_process_enqueue_documents(
             split_by_character, split_by_character_only
         )
@@ -1213,6 +1240,7 @@ class LightRAG:
         ids: list[str] | None = None,
         file_paths: str | list[str] | None = None,
         track_id: str | None = None,
+        page_idx_map: dict[int, int] | None = None,
     ) -> str:
         """
         Pipeline for Processing Documents
@@ -1227,6 +1255,7 @@ class LightRAG:
             ids: list of unique document IDs, if not provided, MD5 hash IDs will be generated
             file_paths: list of file paths corresponding to each document, used for citation
             track_id: tracking ID for monitoring processing status, if not provided, will be generated with "enqueue" prefix
+            page_idx_map: Optional mapping from character position to page_idx for chunks
 
         Returns:
             str: tracking ID for monitoring processing status
@@ -1304,6 +1333,9 @@ class LightRAG:
                     "file_path"
                 ],  # Store file path in document status
                 "track_id": track_id,  # Store track_id in document status
+                "metadata": {
+                    "page_idx_map": page_idx_map if page_idx_map else {}
+                },  # Store page_idx_map for chunking
             }
             for id_, content_data in contents.items()
         }
@@ -1756,22 +1788,58 @@ class LightRAG:
                                 )
                             content = content_data["content"]
 
+                            # Get page_idx_map from document status metadata
+                            page_idx_map = status_doc.metadata.get("page_idx_map", {}) if hasattr(status_doc, "metadata") and status_doc.metadata else {}
+
+                            # Helper function to determine page_idx for a chunk based on its content position
+                            def get_page_idx_for_chunk(chunk_content: str, full_content: str, page_idx_map: dict) -> int:
+                                """Determine the page_idx for a chunk by finding its position in the full content"""
+                                if not page_idx_map:
+                                    return 1  # Default to page 1 if no mapping
+                                
+                                # Find the position of this chunk in the full content
+                                pos = full_content.find(chunk_content)
+                                if pos == -1:
+                                    return 1  # Chunk not found, default to page 1
+                                
+                                # Use the middle position of the chunk to determine its page
+                                mid_pos = pos + len(chunk_content) // 2
+                                # Convert string keys to int and get the page_idx for this position
+                                int_page_idx_map = {int(k): v for k, v in page_idx_map.items() if str(k).isdigit()}
+                                return int_page_idx_map.get(mid_pos, 1)
+
                             # Generate chunks from document
-                            chunks: dict[str, Any] = {
-                                compute_mdhash_id(dp["content"], prefix="chunk-"): {
-                                    **dp,
-                                    "full_doc_id": doc_id,
-                                    "file_path": file_path,  # Add file path to each chunk
-                                    "llm_cache_list": [],  # Initialize empty LLM cache list for each chunk
-                                }
-                                for dp in self.chunking_func(
+                            # Try to call chunking function with page_idx_map if it supports it
+                            try:
+                                chunk_results = list(self.chunking_func(
                                     self.tokenizer,
                                     content,
                                     split_by_character,
                                     split_by_character_only,
                                     self.chunk_overlap_token_size,
                                     self.chunk_token_size,
-                                )
+                                    page_idx_map,  # Pass page_idx_map for page-aware chunking
+                                ))
+                            except TypeError:
+                                # Fallback for chunking functions that don't support page_idx_map parameter
+                                chunk_results = list(self.chunking_func(
+                                    self.tokenizer,
+                                    content,
+                                    split_by_character,
+                                    split_by_character_only,
+                                    self.chunk_overlap_token_size,
+                                    self.chunk_token_size,
+                                ))
+                            
+                            chunks: dict[str, Any] = {
+                                compute_mdhash_id(dp["content"], prefix="chunk-"): {
+                                    **dp,
+                                    "full_doc_id": doc_id,
+                                    "file_path": file_path,  # Add file path to each chunk
+                                    "llm_cache_list": [],  # Initialize empty LLM cache list for each chunk
+                                    "page_idx": dp.get("page_idx", get_page_idx_for_chunk(dp["content"], content, page_idx_map)),  # Use page_idx from chunking if available
+                                }
+                                for dp in chunk_results
                             }
 
                             if not chunks:
@@ -2463,7 +2531,8 @@ class LightRAG:
                             "content": str,          # Document chunk content
                             "file_path": str,        # Origin file path
                             "chunk_id": str,         # Unique chunk identifier
-                            "reference_id": str      # Reference identifier for citations
+                            "reference_id": str,     # Reference identifier for citations
+                            "page_idx": int          # Page number (1-based, None if unavailable)
                         }
                     ],
                     "references": [
